@@ -11,7 +11,7 @@ import mutagen
 from mutagen.mp3 import EasyMP3
 #import requests
 #from mutagen.id3 import ID3, APIC
-dl_pathway = '/home/codex/Stažené/DL/'
+dl_pathway = '/mnt/d/Stažené soubory/DL/'
 
 def on_complete(stream, filepath):
     print("COMPLETE!  --> " + filepath)
