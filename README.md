@@ -1,6 +1,5 @@
 # Youtube_Downloader_Py
--- 
-# Smal script for downloading videos from youtube
+Small script for downloading videos from youtube
 ## 3 Modes:
 1. **V/v** - Download only MP4 video
 2. **A/a** - Download MP4 and convert to mp3 (auto delete MP4)
