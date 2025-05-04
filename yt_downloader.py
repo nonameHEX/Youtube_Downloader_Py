@@ -1,189 +1,143 @@
 import os
-from time import sleep
 import re
-import logging
+import yt_dlp
+import imageio_ffmpeg
 import requests
 from requests.exceptions import RequestException, HTTPError, ConnectionError
-import threading
-
-from pytube import YouTube, exceptions
-from moviepy.editor import *
 from mutagen.easyid3 import EasyID3
 from mutagen.id3 import ID3, APIC
-
+from PIL import Image
+from io import BytesIO
 import ui
 
-REGEX_SPECIAL_CHARS = '[\/:*?"<>|\"\'\:\|\!\?\=\$\%\(\)\{\}\[\];,.]'
-CHOICE_VO = 1   # Video Only
-CHOICE_AO = 2   # Audio Only
-CHOICE_VA = 3   # Video and Audio
-MB_IN_BYTES = 1048576 # MB value in bytes
-logging.basicConfig(level=logging.CRITICAL)
+REGEX_SPECIAL_CHARS = r'[\/:*?"<>|\"\'\:\|\!\?\=\$\%\(\)\{\}\[\];,.]'
+CHOICE_VO, CHOICE_AO, CHOICE_VA = 1, 2, 3
+MB_IN_BYTES = 1048576
+ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
 
-def on_progress(video_object, chunk, bytes_remaining):
-    # video_object by měl být stream obsažen v my_video_object, obsahuje informace o velikosti souboru
-    # chunk obsahuje data v bytech, která ještě nejsou uložená na disk - zbytečný, ale musí být ve funkci
-    # bytes_remaining je int hodnota zbylých bytů co se musí ještě stáhnout
 
-    # Výpočet pro už stažený data v %
-    progress_in_percentage = round(100 - (bytes_remaining / video_object.filesize * 100), 1)
-    # Výpočet už stažených dat v MB
-    progress_in_mb = round((video_object.filesize - bytes_remaining) / MB_IN_BYTES, 2)
-    
-    #logging.info(progress_in_mb + " - " + progress_in_percentage + " %") # Vypisuje progress -> poté předělat na nějaký progressbar v ui
-    ui.progress_bar(progress_in_percentage, progress_in_mb, 1) # Výpis progressu stahování, 1 znamená download
+def my_progress_hook(d: dict):
+    if d['status'] == 'downloading':
+        total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+        downloaded = d.get('downloaded_bytes', 0)
+        if total:
+            progress = downloaded / total * 100
+            ui.progress_bar(progress, downloaded / MB_IN_BYTES, 1)
 
-def hide_moviepy_output_thread(video_clip: AudioFileClip, converted_video_pathway):
-    # Proměnná video_clip se konvertuje na .mp3 soubor (celá cesta, kde se vytvoří i s názvem), logger schová veškery moviepy output když je None
-    video_clip.write_audiofile(filename = converted_video_pathway, logger = None)
 
-def is_possible_music(yt_title):
-    # Nejzákladnější pokus o rozeznání hudbního klipu, většinou bývá název videa "umělec - název skladby"
-    if "-" in yt_title:
-        return True
-    else:
-        return False
-
-def mp3_metadata_change(audio_pathway, yt_title, yt_thumbnail_url):
-    # Změna metadat názvu a umělce v souboru, použito EasyID3 pro jednoduchou práci s tagy
-    audio = EasyID3(audio_pathway)
-    if is_possible_music(yt_title):
-        audio_tags = yt_title.split(" - ")
-        # Možná zavádějící název proměnné, ale hlídá pouze zda je na vstupu A/a N/n
-        choice_default_metadata = False
-        while not choice_default_metadata:
-            ui.print_music_detected(audio_tags)
-            choice = input(ui.Fore.LIGHTCYAN_EX + "Výběr: " + ui.Fore.WHITE)
-            if choice.lower() == "a":
-                choice_default_metadata = True
-            if choice.lower() == "n":
-                audio["artist"] = audio_tags[0]
-                audio["title"] = audio_tags[1]
-                choice_default_metadata = True
-
-    # Pokud se nenajdou tagy (stačí umělec, protože buď budou oba nebo žádný), tak se vloží detekovaná metadata
+def prompt_metadata(audio: EasyID3, title: str):
+    if "-" in title:
+        artist, track_title = title.split(" - ", 1)
+        while True:
+            ui.print_music_detected([artist, track_title])
+            choice = input(ui.Fore.LIGHTCYAN_EX + "Výběr: " + ui.Fore.WHITE).lower()
+            if choice == "a":
+                break
+            elif choice == "n":
+                audio["artist"], audio["title"] = artist, track_title
+                break
     if not audio.get("artist"):
-        ui.print_music_not_detected(yt_title)
-        artist = input(ui.Fore.LIGHTCYAN_EX + "Umělec: " + ui.Fore.WHITE)
-        audio["artist"] = artist
-        title = input(ui.Fore.LIGHTCYAN_EX + "Název: " + ui.Fore.WHITE)
-        audio["title"] = title
+        ui.print_music_not_detected(title)
+        audio["artist"] = input(ui.Fore.LIGHTCYAN_EX + "Umělec: " + ui.Fore.WHITE)
+        audio["title"] = input(ui.Fore.LIGHTCYAN_EX + "Název: " + ui.Fore.WHITE)
 
-    audio.save()
 
-    # Třída ID3 je vylepšená pro práci s audio tagy (EasyID3 nelze použít na přidání obrázku do metadat),
-    # ale zbytečně složitá na jednoduché věci jako změna názvu autora
-    audio = ID3(audio_pathway)
+def download_thumbnail(url: str) -> bytes | None:
     try:
-        thumb_data = requests.get(yt_thumbnail_url).content
-        # Vytvoření instance třídy APIC pro nastavení thumbnailu
-        thumbnail = APIC(
-            data=thumb_data,
-            mime='image/jpeg',
-            desc='thumbnail'
-        )
-        audio.add(thumbnail) # Přidání APIC tagu do audia
-    except RequestException:
-        print("Thumbnail Error - Chyba při požadavku")
-    except HTTPError:
-        print("Thumbnail Error - HTTP chyba")
-    except ConnectionError:
-        print("Thumbnail Error - Chyba připojení")
+        response = requests.get(url)
+        response.raise_for_status()
+        with Image.open(BytesIO(response.content)) as image:
+            if image.mode in ('RGBA', 'LA'):
+                background = Image.new('RGB', image.size, (255, 255, 255))
+                background.paste(image, mask=image.getchannel('A'))
+                image = background
+            else:
+                image = image.convert('RGB')
+            buffer = BytesIO()
+            image.save(buffer, format='JPEG')
+            return buffer.getvalue()
+    except (RequestException, HTTPError, ConnectionError):
+        pass  # potlačíme chybový výpis
+    except Exception:
+        pass
+    return None
 
+
+def mp3_metadata_change(audio_path: str, title: str, thumbnail_url: str | None):
+    audio = EasyID3(audio_path)
+    prompt_metadata(audio, title)
     audio.save()
 
-def download_by_choice(download_pathway, download_choice):
-    url_accepted = False
-    bad_url = False
-    e_msg = ""
+    audio_id3 = ID3(audio_path)
+    if thumbnail_url:
+        jpeg_data = download_thumbnail(thumbnail_url)
+        if jpeg_data:
+            audio_id3.add(APIC(
+                encoding=3,
+                mime='image/jpeg',
+                type=3,
+                desc='Cover',
+                data=jpeg_data
+            ))
+    audio_id3.save()
+
+
+def build_ydl_opts(path: str, choice: int) -> dict:
+    opts = {
+        'outtmpl': os.path.join(path, '%(title)s.%(ext)s'),
+        'progress_hooks': [my_progress_hook],
+        'ffmpeg_location': ffmpeg_path
+    }
+    if choice == CHOICE_VO:
+        opts['format'] = 'bestvideo+bestaudio/best'
+    else:
+        opts['format'] = 'bestaudio/best'
+        opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192'
+        }]
+    return opts
+
+
+def download_by_choice(download_path: str, download_choice: int):
+    url_accepted, bad_url, e_msg = False, False, ""
+    info = None
+
     while not url_accepted:
         ui.print_download_screen(download_type=download_choice, error=e_msg)
+        prompt = "Zadejte URL: " if not bad_url else "Neplatná URL, zadejte znovu: "
+        url = input(ui.Fore.LIGHTCYAN_EX + prompt + ui.Fore.WHITE)
+
         try:
-            if not bad_url:
-                my_url = input(ui.Fore.LIGHTCYAN_EX + "Zadejte URL: " + ui.Fore.WHITE)
-            else:
-                my_url = input(ui.Fore.LIGHTCYAN_EX + "Neplatná URL, zadejte znovu: " + ui.Fore.WHITE)
-            my_video_object = YouTube(url = my_url, on_progress_callback = on_progress)
-            # Video bude obsahovat celou cestu s názvem k souboru jako string -> download_pathway\nazev.mp4
-            if download_choice == CHOICE_VO or download_choice == CHOICE_VA:
-                video = my_video_object.streams.get_highest_resolution().download(output_path = download_pathway)
-            elif download_choice == CHOICE_AO:
-                video = my_video_object.streams.get_audio_only().download(output_path = download_pathway)
+            ydl_opts = build_ydl_opts(download_path, download_choice)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                file_path = ydl.prepare_filename(info)
+                if download_choice in (CHOICE_AO, CHOICE_VA):
+                    file_path = os.path.splitext(file_path)[0] + '.mp3'
             url_accepted = True
-        except exceptions.RegexMatchError:
-            bad_url = True
-            e_msg = ui.Fore.RED + "Chyba: " + ui.Fore.WHITE + "Neplatná URL adresa"
-        except exceptions.AgeRestrictedError as e:
-            bad_url = True
-            e_msg = ui.Fore.RED + "Chyba: " + ui.Fore.WHITE + "Video s adresou " + e.video_id + " je věkově omezené"
-        except exceptions.VideoUnavailable as e:
-            bad_url = True
-            e_msg = ui.Fore.RED + "Chyba: " + ui.Fore.WHITE + "Video s adresou " + e.video_id + " neexistuje"
-        except Exception:
-            bad_url = True
-            e_msg = ui.Fore.RED + "Chyba: " + ui.Fore.WHITE + "Vyskytla se neznámá chyba"
+        except yt_dlp.utils.DownloadError as e:
+            bad_url, e_msg = True, ui.Fore.RED + "Chyba: " + ui.Fore.WHITE + str(e)
+        except Exception as e:
+            bad_url, e_msg = True, ui.Fore.RED + "Chyba: " + ui.Fore.WHITE + "Neznámá chyba: " + str(e)
 
-    logging.debug(my_video_object)
+    title = info.get('title', 'Unknown Title')
 
-    # Možná zavádějící název proměnné, ale hlídá pouze zda je na vstupu A/a N/n
-    choice_rename_accepted = False
-    while not choice_rename_accepted:
-        ui.print_name(my_video_object.title)
-        choice = input(ui.Fore.LIGHTCYAN_EX + "Výběr: " + ui.Fore.WHITE)
-        if choice.lower() == "a":
+    while True:
+        ui.print_name(title)
+        choice = input(ui.Fore.LIGHTCYAN_EX + "Výběr: " + ui.Fore.WHITE).lower()
+        if choice == "a":
             new_title = input(ui.Fore.LIGHTCYAN_EX + "Nový název: " + ui.Fore.WHITE)
-            logging.debug(new_title)
-            # Odstranění speciálních znaků z názvu (OS by mohl mít problém, kdyby tam zůstaly)
-            clean_title = re.sub(REGEX_SPECIAL_CHARS, "", new_title) + ".mp4"
-            logging.debug(clean_title)
-            new_video = os.path.join(download_pathway, clean_title)
-            logging.debug(new_video)
-            # Přejmenování souboru na nový název a uložení cesty do proměnné video
-            os.rename(video, new_video)
-            video = new_video
-            choice_rename_accepted = True
-        elif choice.lower() == "n":
-            choice_rename_accepted = True
+            clean_title = re.sub(REGEX_SPECIAL_CHARS, "", new_title) + os.path.splitext(file_path)[1]
+            new_path = os.path.join(download_path, clean_title)
+            os.rename(file_path, new_path)
+            file_path = new_path
+            break
+        elif choice == "n":
+            break
 
-    if download_choice == CHOICE_VO:
-        ui.print_success_download(video)
-    elif download_choice == CHOICE_AO or download_choice == CHOICE_VA:
-        converted_video_pathway = re.sub(".mp4", ".mp3", video)
-        # Vytvoření objektu AudioClip do proměnné video_clip, proměnná má název video_clip, protože to stále je .mp4 soubor
-        video_clip = AudioFileClip(video)
+    ui.print_success_download(file_path)
 
-        # Potřebujeme zjistit celkový počet chunků, které se budou během iterací/s konvertovat
-        # chunksize=2000 je dáno proto, protože write_audiofile funkce moviepy má jako základní hodnotu biffersize=2000 
-        # (u některých videí to hodilo IndexError, při větším chunksize)
-        chunks = len(list(video_clip.iter_chunks(chunksize=2000)))
-        logging.debug("Chunks: " + str(chunks))
-
-        # Potřebujeme velikost videa a převedeme na MB pro výpis
-        if download_choice == CHOICE_AO:
-            itag = my_video_object.streams.get_audio_only().itag
-        else:
-            itag = my_video_object.streams.get_highest_resolution().itag
-        total_size = my_video_object.streams.get_by_itag(itag).filesize / MB_IN_BYTES
-
-        # Přesměrování moviepy na jiný thread aby se mohl udělat custom loading bar zároveň s konverzí
-        moviepy_thread = threading.Thread(target=hide_moviepy_output_thread, args=(video_clip, converted_video_pathway))
-        moviepy_thread.start()
-
-        # Fake konverze pro výpis custom loading baru +/- odpovídá realitě od 1 do 100 %
-        for i in range(100+1):
-            progress_mb = (total_size / 100) * (i)
-            ui.progress_bar(float(i), round(progress_mb, 2), 2) # Výpis progressu stahování, 2 znamená fake konvert
-            # Aby 1% odpovídalo reálné konverzi chunků, doba je nastavena lehce pod průměr konverze moviepy za normálního stavu
-            sleep((chunks / 1300) / 100)
-
-        moviepy_thread.join()
-
-        if download_choice == CHOICE_AO:
-            # Odstranění .mp4 souboru, pokud chceme pouze audio
-            os.remove(video)
-            ui.print_success_download(converted_video_pathway)
-        if download_choice == CHOICE_VA:
-            ui.print_success_download(path1=video, path2=converted_video_pathway)
-
-        # Změna metadat u MP3 souboru
-        mp3_metadata_change(converted_video_pathway, my_video_object.title, my_video_object.thumbnail_url)
+    if download_choice in (CHOICE_AO, CHOICE_VA):
+        mp3_metadata_change(file_path, title, info.get('thumbnail'))

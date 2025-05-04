@@ -6,76 +6,71 @@ import ui
 from yt_downloader import download_by_choice, CHOICE_VO, CHOICE_AO, CHOICE_VA
 
 DEFAULT_DOWNLOAD_PATH = "YTDownload"
-ROWS = 24
-COLS = 120
+ROWS, COLS = 24, 120
 
 logging.basicConfig(level=logging.CRITICAL)
 
-def parse_arguments():
+
+def parse_arguments() -> str:
     if "-h" in sys.argv or "--help" in sys.argv:
-        # Bude volána funkce z ui na print help
         print("Program pro stahování videí/hudby z YouTube.")
         print("Použití: main.py [výstupní_adresář]")
-        print("V případě, že nenapíšete žádný adresář, budou všechny soubory uloženy do výchozí složky YTDownload")
+        print("Pokud nezadáte adresář, použije se výchozí složka YTDownload.")
         sys.exit(0)
-    
+
     if len(sys.argv) > 2:
-        print("Chyba: Příliš mnoho argumentů.") # Bude volána funkce u ui na nějaký error list
+        print("Chyba: Příliš mnoho argumentů.")
         sys.exit(1)
 
-    if len(sys.argv) == 2:
-        # Pokud bude velikost vstupních argumentů rovna 2 a nebude tam přepínač pro nápovědu, tak si uložíme cestu
-        output_dir = sys.argv[1]
-    else:
-        # Pokud bude program spuštěn bez argumentu, tak se bude ukládat do defaultní složky
-        output_dir = DEFAULT_DOWNLOAD_PATH
+    return sys.argv[1] if len(sys.argv) == 2 else DEFAULT_DOWNLOAD_PATH
 
-    return output_dir
 
-def main():
-    # V případě, že nebudeme chtít nápovědu, tak se vrátí název složky/cesta ke složce, kam budeme chtít ukládat soubory
-    output_dir = parse_arguments()
-    logging.debug(f" {output_dir}")
+def resolve_output_dir(directory: str) -> str:
+    abs_default = os.path.abspath(DEFAULT_DOWNLOAD_PATH)
+    abs_dir = os.path.abspath(directory)
 
-    # Kontrola existence adresáře, kam chceme ukládat soubory
-    if not output_dir is DEFAULT_DOWNLOAD_PATH and not os.path.exists(output_dir):
-        print(f"Adresář '{output_dir}' neexistuje.")
+    if directory != DEFAULT_DOWNLOAD_PATH and not os.path.exists(directory):
+        print(f"Adresář '{directory}' neexistuje.")
         sys.exit(1)
 
-    # Výchozí cesta pro uložení souborů
-    output_dir = os.path.abspath(output_dir)
+    if abs_dir == abs_default:
+        abs_dir = os.path.join(os.getcwd(), DEFAULT_DOWNLOAD_PATH)
+        os.makedirs(abs_dir, exist_ok=True)
 
-    # Pokud je cesta 'YTDownload', vytvoří se složka 'YTDownload' ve stejném adresáři jako spouštěný program
-    if output_dir == os.path.abspath(DEFAULT_DOWNLOAD_PATH):
-        output_dir = os.path.join(os.getcwd(), DEFAULT_DOWNLOAD_PATH)
-        os.makedirs(output_dir, exist_ok=True)
+    return abs_dir
 
-    # Logika programu než se přejde do funkce z yt_downloader modulu
-    ui.set_console_size(ROWS, COLS)
-    end_program = False
-    while not end_program:
-        logging.debug(f" {output_dir}")
 
-        ui.print_basic_menu()
-        choice = input(ui.Fore.LIGHTCYAN_EX + "Výběr: " + ui.Fore.WHITE)
+def handle_choice(choice: str, output_dir: str):
+    actions = {
+        "v": (CHOICE_VO, "POUZE VIDEO MOŽNOST"),
+        "a": (CHOICE_AO, "POUZE AUDIO MOŽNOST"),
+        "o": (CHOICE_VA, "VIDEO A AUDIO MOŽNOST"),
+        "u": None
+    }
 
+    selected = actions.get(choice.lower())
+    if selected:
         if choice.lower() == "u":
             ui.print_closing_screen()
-            end_program = True
+            return False
+        choice_type, log_msg = selected
+        logging.debug(log_msg)
+        download_by_choice(download_path=output_dir, download_choice=choice_type)
+    return True
 
-        elif choice.lower() == "v":
-            logging.debug(f"POUZE VIDEO MOŽNOST")
-            download_by_choice(download_pathway = output_dir, download_choice = CHOICE_VO)
 
-        elif choice.lower() == "a":
-            logging.debug(f"POUZE AUDIO MOŽNOST")
-            download_by_choice(download_pathway = output_dir, download_choice = CHOICE_AO)
+def main():
+    output_dir = resolve_output_dir(parse_arguments())
+    logging.debug(f"Výstupní adresář: {output_dir}")
 
-        elif choice.lower() == "o":
-            logging.debug(f"VIDEO A AUDIO MOŽNOST")
-            download_by_choice(download_pathway = output_dir, download_choice = CHOICE_VA)
+    ui.set_console_size(ROWS, COLS)
 
-        #end_program = True # Pro debug, potom se smaže, potřebuji vidět výpis debugu při pouze jednom běhu
+    while True:
+        ui.print_basic_menu()
+        choice = input(ui.Fore.LIGHTCYAN_EX + "Výběr: " + ui.Fore.WHITE)
+        if not handle_choice(choice, output_dir):
+            break
+
 
 if __name__ == "__main__":
     try:
