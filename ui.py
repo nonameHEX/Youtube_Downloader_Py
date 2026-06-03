@@ -80,7 +80,17 @@ def _print_metadata_screen(title: str, is_detected: bool):
 
 
 def print_music_detected(audio_tags: list):
-    _print_metadata_screen("", is_detected=True)
+    _clear_console()
+    _up_frame()
+    artist = audio_tags[0] if len(audio_tags) > 0 else ""
+    title = audio_tags[1] if len(audio_tags) > 1 else ""
+    print_centered("! Auto detekce metadat z názvu videa !")
+    print_centered(f"{Fore.YELLOW}Umělec: {Fore.WHITE}{artist}")
+    print_centered(f"{Fore.YELLOW}Název: {Fore.WHITE}{title}")
+    print_centered("")
+    print_centered("Použít tento návrh?")
+    print_centered(f"({Fore.GREEN}A{Fore.WHITE})no | ({Fore.RED}N{Fore.WHITE})e, upravit ručně")
+    _down_frame(3)
 
 
 def print_music_not_detected(name: str):
